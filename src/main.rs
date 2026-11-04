@@ -2,6 +2,7 @@ mod convert;
 mod head;
 mod merge;
 mod parser;
+mod sample;
 mod stats;
 mod util;
 
@@ -21,8 +22,8 @@ use crate::util::is_broken_pipe;
 /// Fast FASTA/FASTQ toolkit.
 ///
 /// `fast stats` prints summary statistics (compatible with `seqkit stats`);
-/// `fast head`, `fast fa2fq`, `fast fq2fa` and `fast merge` provide fast
-/// record-level operations.
+/// `fast head`, `fast sample`, `fast fa2fq`, `fast fq2fa` and `fast merge`
+/// provide fast record-level operations.
 #[derive(Parser, Debug)]
 #[command(name = "fast", version, about)]
 struct Cli {
@@ -114,6 +115,9 @@ enum Command {
 
     /// Print the first N records in total
     Head(HeadArgs),
+
+    /// Randomly sample a proportion of records
+    Sample(SampleArgs),
 }
 
 #[derive(Args, Debug)]
@@ -174,6 +178,25 @@ struct HeadArgs {
     files: Vec<String>,
 }
 
+#[derive(Args, Debug)]
+struct SampleArgs {
+    /// Sampling proportion in [0, 1]
+    #[arg(short = 's', long = "proportion", value_name = "FLOAT")]
+    proportion: f64,
+
+    /// Random seed for reproducible sampling
+    #[arg(long, value_name = "N", default_value_t = 11)]
+    seed: u64,
+
+    /// Output file (default: stdout; "-" for stdout)
+    #[arg(short = 'o', long = "out-file", value_name = "FILE")]
+    out_file: Option<String>,
+
+    /// Input FASTA/FASTQ files (plain or gzip; "-" for stdin)
+    #[arg(value_name = "FILE")]
+    files: Vec<String>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -200,6 +223,7 @@ fn main() -> ExitCode {
         Command::Fq2fa(args) => run_fq2fa(args, &stream),
         Command::Merge(args) => run_merge(args, &stream),
         Command::Head(args) => run_head(args, &stream),
+        Command::Sample(args) => run_sample(args, &stream),
     }
 }
 
@@ -387,6 +411,31 @@ fn run_head(args: HeadArgs, stream: &StreamConfig) -> ExitCode {
         Err(e) => {
             eprintln!("fast head: {e:#}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_sample(args: SampleArgs, stream: &StreamConfig) -> ExitCode {
+    if !args.proportion.is_finite() || !(0.0..=1.0).contains(&args.proportion) {
+        eprintln!("fast sample: --proportion must be in the range [0, 1]");
+        return ExitCode::FAILURE;
+    }
+
+    let files = input_files(&args.files);
+    let mut out = match open_output(args.out_file.as_deref()) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("fast sample: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match sample::run(&files, args.proportion, args.seed, stream, &mut *out) {
+        Ok(()) => finish_output(out, false),
+        Err(e) if is_broken_pipe(&e) => finish_output(out, false),
+        Err(e) => {
+            eprintln!("fast sample: {e:#}");
+            finish_output(out, true)
         }
     }
 }

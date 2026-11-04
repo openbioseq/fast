@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_fast")
@@ -361,6 +362,177 @@ fn global_options_work_on_either_side_of_the_subcommand() {
             .unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8(out.stdout).unwrap(), ">a\nACGT\n");
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+fn fasta_records(n: usize) -> String {
+    let mut out = String::new();
+    for i in 0..n {
+        out.push_str(&format!(">r{i} desc\nACGTACGTAC\n"));
+    }
+    out
+}
+
+#[test]
+fn sample_selects_the_target_count_and_is_thread_independent() {
+    let dir = tempdir("sample-deterministic");
+    fs::write(dir.join("a.fa"), fasta_records(1000)).unwrap();
+
+    let run = |threads: &str, seed: &str| {
+        Command::new(bin())
+            .current_dir(&dir)
+            .args(["sample", "-s", "0.1", "--seed", seed, "-t", threads, "a.fa"])
+            .output()
+            .unwrap()
+    };
+
+    let one = run("1", "42");
+    let four = run("4", "42");
+    assert!(one.status.success());
+    assert!(four.status.success());
+
+    let text = String::from_utf8(one.stdout).unwrap();
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with('>')).count(),
+        100
+    );
+    assert_eq!(four.stdout, text.as_bytes());
+
+    let other = run("1", "43");
+    assert!(other.status.success());
+    assert_ne!(other.stdout, text.as_bytes());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sample_count_is_global_across_inputs() {
+    let dir = tempdir("sample-multiple");
+    fs::write(dir.join("a.fa"), fasta_records(60)).unwrap();
+    fs::write(dir.join("b.fa"), fasta_records(40)).unwrap();
+
+    let out = Command::new(bin())
+        .current_dir(&dir)
+        .args(["sample", "-s", "0.5", "--seed", "7", "a.fa", "b.fa"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with('>')).count(),
+        50
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sample_result_is_independent_of_block_size() {
+    let dir = tempdir("sample-block-size");
+    fs::write(dir.join("a.fa"), fasta_records(100_000)).unwrap();
+
+    let run = |block_size: &str| {
+        Command::new(bin())
+            .current_dir(&dir)
+            .args([
+                "sample",
+                "-s",
+                "0.37",
+                "--seed",
+                "123",
+                "-t",
+                "4",
+                "-B",
+                block_size,
+                "a.fa",
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let one_mib = run("1M");
+    let two_mib = run("2M");
+    assert!(one_mib.status.success());
+    assert!(two_mib.status.success());
+    assert_eq!(one_mib.stdout, two_mib.stdout);
+
+    let text = String::from_utf8(one_mib.stdout).unwrap();
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with('>')).count(),
+        37_000
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sample_preserves_wrapped_fastq_and_full_proportion() {
+    let dir = tempdir("sample-fastq");
+    let body = wrapped_fastq();
+    fs::write(dir.join("a.fq"), &body).unwrap();
+
+    let out = Command::new(bin())
+        .current_dir(&dir)
+        .args(["sample", "-s", "1", "a.fq"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), body);
+
+    let out = Command::new(bin())
+        .current_dir(&dir)
+        .args(["sample", "-s", "0", "a.fq"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sample_reads_stdin_with_a_single_pass() {
+    let dir = tempdir("sample-stdin");
+    let body = fasta_records(20);
+
+    let mut child = Command::new(bin())
+        .current_dir(&dir)
+        .args(["sample", "-s", "1", "--seed", "5"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), body);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sample_rejects_an_invalid_proportion() {
+    let dir = tempdir("sample-invalid");
+    fs::write(dir.join("a.fa"), fasta_records(1)).unwrap();
+
+    for proportion in ["-0.1", "1.1", "NaN"] {
+        let out = Command::new(bin())
+            .current_dir(&dir)
+            .args(["sample", "-s", proportion, "a.fa"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let stderr = String::from_utf8(out.stderr).unwrap();
+        assert!(stderr.contains("--proportion"));
     }
 
     let _ = fs::remove_dir_all(&dir);

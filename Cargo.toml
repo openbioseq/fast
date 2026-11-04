@@ -2,7 +2,7 @@
 name = "fast"
 version = "0.1.0"
 edition = "2024"
-description = "Fast FASTA/FASTQ toolkit: stats, fa2fq, fq2fa, merge and head"
+description = "Fast FASTA/FASTQ toolkit: stats, fa2fq, fq2fa, merge, head and sample"
 license = "MIT"
 
 [dependencies]

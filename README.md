@@ -1,7 +1,7 @@
 # fast
 
 用 Rust 实现的极速 FASTA/FASTQ 工具箱，提供 `stats`、`fa2fq`、`fq2fa`、
-`merge`、`head` 五个子命令。所有子命令共享同一套
+`merge`、`head`、`sample` 六个子命令。所有子命令共享同一套
 **分块流式读取 + 记录边界对齐的并行处理**：默认每块 16 MiB，内存占用与文件大小
 基本无关，同时充分利用多核 CPU。`fast` 后面必须跟子命令。
 
@@ -15,11 +15,12 @@
 
 ## 特性
 
-- 子命令：`stats`（统计，兼容 `seqkit stats`）、`fa2fq`、`fq2fa`、`merge`、`head`
+- 子命令：`stats`（统计，兼容 `seqkit stats`）、`fa2fq`、`fq2fa`、`merge`、`head`、`sample`
 - 统计：序列数、总长度、最小/平均/最大长度、N50、N50_num、Q1/Q2/Q3、N10/N30/...、GC%、gap 数、N 数
 - FASTQ 额外统计：Q20(%)、Q30(%)、AvgQual（与 seqkit 相同的误差率平均算法）
 - 转换与截取按原始字节处理：`memchr` 定位行边界、整行批量拷贝、按记录边界分块并行，不经过通用记录对象
 - `head` 找到第 N 条记录的结束位置后直接拷贝原始字节，可提前停止读取
+- `sample` 按记录名 hash 确定性下采样，同 seed 结果与线程数无关，并保持输入顺序
 - 支持 `.fa/.fasta/.fq/.fastq`、gzip/BGZF 压缩文件、stdin
 - 支持多行（wrapped）FASTQ：序列和/或质量行按任意宽度折行时仍能正确识别记录边界，
   四行记录走快速路径，多行记录走精确解析
@@ -86,6 +87,10 @@ fast merge lane1.fq.gz lane2.fq.gz > all.fq
 # 跨所有输入取前 N 条 record（FASTA/FASTQ 自动识别）
 fast head -n 1000 reads.fq.gz > first1k.fq
 fast head -n 20 -o first20.fa assembly.fa
+
+# 随机下采样 10%（两遍扫描，输出条数精确为 round(N * 0.1)）
+fast sample -s 0.1 --seed 42 reads.fq.gz > subsample.fq
+fast sample -s 0.25 -o sub.fa assembly.fa
 ```
 
 ### 全局选项
@@ -101,6 +106,7 @@ Commands:
   fq2fa  Convert FASTQ to FASTA
   merge  Merge (concatenate) FASTA/FASTQ files in input order
   head   Print the first N records in total
+  sample Randomly sample a proportion of records
 
 Options:
   -t, --threads <N>          Number of threads (default: all logical CPUs)
@@ -170,6 +176,24 @@ Usage: fast head [OPTIONS] [FILE]...
 ```
 
 `-n` 跨所有输入文件生效（与 `seqkit head` 一致），记录内容保持原始 FASTA/FASTQ 字节。
+
+### `fast sample` 选项
+
+```text
+Usage: fast sample [OPTIONS] [FILE]...
+
+  -s, --proportion <FLOAT>  Sampling proportion in [0, 1]
+      --seed <N>            Random seed for reproducible sampling [default: 11]
+  -o, --out-file <FILE>     Output file (default: stdout; "-" for stdout)
+```
+
+对普通文件和 gzip 文件采用两遍扫描：第一遍统计记录总数 `N`，第二遍按
+`round(N * proportion)` 精确输出目标条数。记录头第一个空白分隔字段（name/id）与
+`--seed` 一起计算稳定 hash，因此相同输入、seed 和比例的结果完全一致，也与 `-t`
+线程数无关。输出保持输入顺序和原始 FASTA/FASTQ 字节，支持多行 FASTQ。
+
+stdin（`-`）无法回退读取，此场景自动退化为单遍 hash 阈值抽样，输出比例接近
+`-s` 指定值但不保证精确条数。多文件采样时目标条数按所有输入的总记录数计算。
 
 ## 输出列
 
