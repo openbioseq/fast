@@ -44,6 +44,21 @@ cargo build --release
 cargo install --path .
 ```
 
+## 预编译二进制
+
+推送 `v*` tag 会触发 [Release workflow](.github/workflows/release.yml)，自动构建并上传：
+
+- Linux x86_64：使用 `cargo-zigbuild` 链接 glibc 2.17，兼容较老的发行版
+- Windows x86_64（MSVC）
+- macOS aarch64 / x86_64
+
+创建 tag 并推送即可发布：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## 用法
 
 ```bash

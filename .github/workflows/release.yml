@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag, e.g. v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Zigbuild cross-links against glibc 2.17 for broad Linux compatibility.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            zigbuild: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            zigbuild: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            zigbuild: false
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            zigbuild: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Zig and cargo-zigbuild
+        if: matrix.zigbuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          pipx install ziglang
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild
+
+      - name: Build (zigbuild, glibc 2.17)
+        if: matrix.zigbuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo zigbuild --locked --release --target "${{ matrix.target }}.2.17"
+
+      - name: Verify glibc 2.17 compatibility
+        if: matrix.zigbuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$(find target -type f -path '*/release/fast' | head -n1)"
+          test -n "$bin"
+          echo "Binary: $bin"
+          max="$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu | tail -n1 || true)"
+          echo "Maximum required glibc symbol version: ${max:-none}"
+          if [ -n "$max" ] && [ "$(printf '%s\n' "$max" GLIBC_2.17 | sort -V | tail -n1)" != "GLIBC_2.17" ]; then
+            echo "::error::Binary requires $max, which is newer than glibc 2.17"
+            exit 1
+          fi
+
+      - name: Build
+        if: ${{ !matrix.zigbuild }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="fast-${RELEASE_TAG}-${{ matrix.target }}"
+          bin="$(find target -type f -path '*/release/fast' | head -n1)"
+          test -n "$bin"
+          mkdir -p "dist/$name"
+          cp "$bin" "dist/$name/fast"
+          cp README.md "dist/$name/README.md"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="fast-${RELEASE_TAG}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/fast" "dist/$name/fast"
+          cp README.md "dist/$name/README.md"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "fast-$env:RELEASE_TAG-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path "dist/$name" -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/fast.exe" "dist/$name/fast.exe"
+          Copy-Item "README.md" "dist/$name/README.md"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          Remove-Item -Recurse -Force "dist/$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fast-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lh dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
