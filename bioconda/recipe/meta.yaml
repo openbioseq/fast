@@ -11,6 +11,9 @@ source:
 
 build:
   number: 0
+  # The Rust binary only links system libraries. Skipping macOS relocation
+  # also avoids llvm-otool failing while inspecting the Mach-O executable.
+  binary_relocation: false  # [osx]
   run_exports:
     - {{ pin_subpackage(name, max_pin="x.x") }}
 
